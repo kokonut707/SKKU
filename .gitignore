@@ -1,0 +1,9 @@
+.vscode/
+build.log
+render-debug.log
+gl-03-transform/bin/runtime.*.log
+gl-03-transform/bin/*.exe
+gl-03-transform/bin/*.pdb
+gl-03-transform/bin/*.lib
+imgui.ini
+gl-03-transform/bin/imgui.ini
