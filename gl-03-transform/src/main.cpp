@@ -11,6 +11,7 @@
 #include "cgut.h"		// slee's OpenGL utility
 #include "trackball.h"	// virtual trackball
 #include "sphere.h"		// sphere class definition
+#include <random>
 
 //*************************************
 // global constants
@@ -131,6 +132,58 @@ std::string asset_path(const char* relative_path)
 #endif
 }
 
+struct lab_color { float l, a, b; };
+
+lab_color rgb_to_lab(float red, float green, float blue)
+{
+	auto linearize = [](float channel)
+	{
+		return channel <= 0.04045f ? channel / 12.92f : powf((channel + 0.055f) / 1.055f, 2.4f);
+	};
+	red = linearize(red); green = linearize(green); blue = linearize(blue);
+	float x = (red * 0.4124564f + green * 0.3575761f + blue * 0.1804375f) / 0.95047f;
+	float y = (red * 0.2126729f + green * 0.7151522f + blue * 0.0721750f);
+	float z = (red * 0.0193339f + green * 0.1191920f + blue * 0.9503041f) / 1.08883f;
+	auto lab_curve = [](float value)
+	{
+		return value > 0.008856f ? cbrtf(value) : 7.787f * value + 16.0f / 116.0f;
+	};
+	x = lab_curve(x); y = lab_curve(y); z = lab_curve(z);
+	return { 116.0f * y - 16.0f, 500.0f * (x - y), 200.0f * (y - z) };
+}
+
+vec3 lab_to_rgb(const lab_color& color)
+{
+	float fy = (color.l + 16.0f) / 116.0f;
+	float fx = color.a / 500.0f + fy;
+	float fz = fy - color.b / 200.0f;
+	auto inverse_lab_curve = [](float value)
+	{
+		float cube = value * value * value;
+		return cube > 0.008856f ? cube : (value - 16.0f / 116.0f) / 7.787f;
+	};
+	float x = 0.95047f * inverse_lab_curve(fx);
+	float y = inverse_lab_curve(fy);
+	float z = 1.08883f * inverse_lab_curve(fz);
+	float red = x * 3.2404542f - y * 1.5371385f - z * 0.4985314f;
+	float green = -x * 0.9692660f + y * 1.8760108f + z * 0.0415560f;
+	float blue = x * 0.0556434f - y * 0.2040259f + z * 1.0572252f;
+	auto delinearize = [](float channel)
+	{
+		channel = std::max(0.0f, std::min(1.0f, channel));
+		return channel <= 0.0031308f ? 12.92f * channel : 1.055f * powf(channel, 1.0f / 2.4f) - 0.055f;
+	};
+	return vec3(delinearize(red), delinearize(green), delinearize(blue));
+}
+
+float lab_distance_squared(const lab_color& first, const lab_color& second)
+{
+	float dl = first.l - second.l;
+	float da = first.a - second.a;
+	float db = first.b - second.b;
+	return dl * dl + da * da + db * db;
+}
+
 void update_cluster_colors(int image_index)
 {
 	const image_button& source = image_buttons[image_index];
@@ -138,46 +191,76 @@ void update_cluster_colors(int image_index)
 
 	const int pixel_count = source.width * source.height;
 	const int sample_step = std::max(pixel_count / 12000, 1);
-	float centers[4][3] = {};
-	for (int cluster = 0; cluster < 4; ++cluster)
+	std::vector<lab_color> samples;
+	for (int pixel = 0; pixel < pixel_count; pixel += sample_step)
 	{
-		int pixel = std::min(cluster * pixel_count / 4, pixel_count - 1);
 		const unsigned char* color = &source.pixels[pixel * 4];
-		centers[cluster][0] = color[0] / 255.0f;
-		centers[cluster][1] = color[1] / 255.0f;
-		centers[cluster][2] = color[2] / 255.0f;
+		float red = color[0] / 255.0f;
+		float green = color[1] / 255.0f;
+		float blue = color[2] / 255.0f;
+		samples.push_back(rgb_to_lab(red, green, blue));
+	}
+	if (samples.empty()) return;
+
+	constexpr int cluster_count = 4;
+	std::vector<lab_color> centers;
+	centers.reserve(cluster_count);
+	std::mt19937 generator(1337);
+	std::uniform_real_distribution<float> unit_distribution(0.0f, 1.0f);
+	centers.push_back(samples[0]);
+	for (int cluster = 1; cluster < cluster_count; ++cluster)
+	{
+		std::vector<float> distances(samples.size(), 0.0f);
+		float total_distance = 0.0f;
+		for (size_t sample = 0; sample < samples.size(); ++sample)
+		{
+			float nearest_distance = FLT_MAX;
+			for (const lab_color& center : centers)
+				nearest_distance = std::min(nearest_distance, lab_distance_squared(samples[sample], center));
+			distances[sample] = nearest_distance;
+			total_distance += nearest_distance;
+		}
+		if (total_distance <= 0.0f)
+		{
+			centers.push_back(samples[cluster % samples.size()]);
+			continue;
+		}
+		float target = unit_distribution(generator) * total_distance;
+		for (size_t sample = 0; sample < distances.size(); ++sample)
+		{
+			target -= distances[sample];
+			if (target <= 0.0f) { centers.push_back(samples[sample]); break; }
+		}
+		if (centers.size() <= (size_t)cluster)
+			centers.push_back(samples.back());
 	}
 
 	for (int iteration = 0; iteration < 12; ++iteration)
 	{
-		float sums[4][3] = {};
-		int counts[4] = {};
-		for (int pixel = 0; pixel < pixel_count; pixel += sample_step)
+		lab_color sums[cluster_count] = {};
+		int counts[cluster_count] = {};
+		for (const lab_color& sample : samples)
 		{
-			const unsigned char* color = &source.pixels[pixel * 4];
 			int nearest = 0;
 			float nearest_distance = FLT_MAX;
-			for (int cluster = 0; cluster < 4; ++cluster)
+			for (int cluster = 0; cluster < cluster_count; ++cluster)
 			{
-				float dr = color[0] / 255.0f - centers[cluster][0];
-				float dg = color[1] / 255.0f - centers[cluster][1];
-				float db = color[2] / 255.0f - centers[cluster][2];
-				float distance = dr * dr + dg * dg + db * db;
+				float distance = lab_distance_squared(sample, centers[cluster]);
 				if (distance < nearest_distance) { nearest_distance = distance; nearest = cluster; }
 			}
-			sums[nearest][0] += color[0] / 255.0f;
-			sums[nearest][1] += color[1] / 255.0f;
-			sums[nearest][2] += color[2] / 255.0f;
+			sums[nearest].l += sample.l; sums[nearest].a += sample.a; sums[nearest].b += sample.b;
 			++counts[nearest];
 		}
-		for (int cluster = 0; cluster < 4; ++cluster)
+		for (int cluster = 0; cluster < cluster_count; ++cluster)
 			if (counts[cluster] > 0)
-				for (int channel = 0; channel < 3; ++channel)
-					centers[cluster][channel] = sums[cluster][channel] / counts[cluster];
+				centers[cluster] = { sums[cluster].l / counts[cluster], sums[cluster].a / counts[cluster], sums[cluster].b / counts[cluster] };
 	}
 
-	for (int cluster = 0; cluster < 4; ++cluster)
-		cluster_colors[cluster] = ImVec4(centers[cluster][0], centers[cluster][1], centers[cluster][2], 1.0f);
+	for (int cluster = 0; cluster < cluster_count; ++cluster)
+	{
+		vec3 color = lab_to_rgb(centers[cluster]);
+		cluster_colors[cluster] = ImVec4(color.x, color.y, color.z, 1.0f);
+	}
 }
 
 bool load_image_buttons()
