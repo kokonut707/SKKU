@@ -616,9 +616,19 @@ void draw_ui()
 		ImVec2 size(180.0f, 180.0f / aspect);
 		if (ImGui::ImageButton(image_buttons[i].label, (ImTextureID)(intptr_t)image_buttons[i].texture, size))
 		{
-			selected_image = i;
-			update_cluster_colors(selected_image);
-			cartoon_rendering = true;
+			if (selected_image == i)
+			{
+				selected_image = -1;
+				cartoon_rendering = false;
+				for (ImVec4& color : cluster_colors)
+					color = ImVec4(0.0f, 0.0f, 0.0f, 1.0f);
+			}
+			else
+			{
+				selected_image = i;
+				update_cluster_colors(selected_image);
+				cartoon_rendering = true;
+			}
 		}
 		ImGui::SameLine();
 		ImGui::Text("%s%s", image_buttons[i].label, selected_image == i ? "  [selected]" : "");
